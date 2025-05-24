@@ -18,6 +18,7 @@ import SendIcon from '@mui/icons-material/Send';
 import axios from 'axios';
 
 const API_URL = process.env.REACT_APP_API_URL || 'http://localhost:8000';
+console.log('API URL:', API_URL);
 
 function App() {
   const [messages, setMessages] = useState([]);
@@ -45,10 +46,18 @@ function App() {
     setError(null);
 
     try {
+      console.log('Making request to:', `${API_URL}/ask`);
       const response = await axios.post(`${API_URL}/ask`, {
         query: userMessage,
         session_id: sessionId
+      }, {
+        headers: {
+          'Content-Type': 'application/json',
+          'Accept': 'application/json'
+        }
       });
+
+      console.log('Response received:', response.data);
 
       if (response.data.session_id) {
         setSessionId(response.data.session_id);
@@ -60,19 +69,20 @@ function App() {
         agent: response.data.agent_used
       }]);
     } catch (error) {
-      console.error('API Error:', error);
+      console.error('Full error object:', error);
       let errorMessage = 'Sorry, there was an error processing your request.';
       
       if (error.response) {
-        // The request was made and the server responded with a status code
-        // that falls out of the range of 2xx
+        console.error('Error response:', error.response);
         errorMessage = error.response.data.error || errorMessage;
         if (error.response.data.details) {
           errorMessage += ` Details: ${JSON.stringify(error.response.data.details)}`;
         }
       } else if (error.request) {
-        // The request was made but no response was received
+        console.error('No response received:', error.request);
         errorMessage = 'Unable to connect to the server. Please check if the backend is running.';
+      } else {
+        console.error('Error setting up request:', error.message);
       }
       
       setError(errorMessage);
