@@ -2,40 +2,31 @@
   "version": 2,
   "builds": [
     {
+      "src": "app/main.py",
+      "use": "@vercel/python",
+      "env": {
+        "REACT_APP_API_URL": "https://multi-agent-tutor-production-1d88.up.railway.app/"
+      }
+    },
+    {
       "src": "package.json",
       "use": "@vercel/static-build",
       "config": {
         "distDir": "build"
+      },
+      "env": {
+        "REACT_APP_API_URL": "https://multi-agent-tutor-production-1d88.up.railway.app/"
       }
     }
   ],
   "routes": [
     {
-      "src": "/static/(.*)",
-      "dest": "/static/$1"
-    },
-    {
-      "src": "/favicon.ico",
-      "dest": "/favicon.ico"
-    },
-    {
-      "src": "/manifest.json",
-      "dest": "/manifest.json"
-    },
-    {
-      "src": "/logo192.png",
-      "dest": "/logo192.png"
-    },
-    {
-      "src": "/logo512.png",
-      "dest": "/logo512.png"
-    },
-    {
       "src": "/(.*)",
-      "dest": "/index.html"
+      "dest": "app/main.py"
     }
   ],
   "env": {
+    "APP_MODULE": "app.main:app",
     "REACT_APP_API_URL": "https://multi-agent-tutor-production-1d88.up.railway.app/"
   }
-} 
+}
