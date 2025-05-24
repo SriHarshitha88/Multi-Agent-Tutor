@@ -2,6 +2,7 @@
 
 A smart AI tutoring system with specialized agents for different subjects, powered by Google Gemini. The system uses a coordinator agent that intelligently routes questions to specialist agents (Math, Physics) which can utilize tools like equation solvers and formula lookups to provide accurate, educational responses. With session-based context history, the system maintains conversation memory for more personalized and coherent multi-turn interactions.
 
+
 ## 🧠 System Architecture
 
 ```mermaid
