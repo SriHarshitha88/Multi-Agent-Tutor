@@ -1,8 +1,7 @@
 # app/main.py
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel
 import os
 import logging
 import uuid
@@ -17,16 +16,6 @@ from .agents.base_agent import TaskRequest
 # Import utilities
 from .utils.logger import setup_logger, get_logger
 from .utils.session_manager import SessionManager
-from .utils.error_handlers import (
-    TutorException,
-    AgentNotFoundError,
-    InvalidQueryError,
-    SessionError,
-    ToolExecutionError,
-    tutor_exception_handler,
-    validation_exception_handler,
-    general_exception_handler
-)
 
 load_dotenv()
 
@@ -35,34 +24,37 @@ log_level = logging.INFO if os.getenv("ENVIRONMENT") != "production" else loggin
 setup_logger(level=log_level)
 logger = get_logger("main")
 
-# Get port from environment variable (for Railway)
-PORT = int(os.getenv("PORT", 8000))
-
 app = FastAPI(
     title="Multi-Agent AI Tutor", 
     description="AI Tutoring system with specialized agents for different subjects",
     version="2.0.0",
     docs_url="/docs" if os.getenv("ENVIRONMENT") != "production" else None,
-    redoc_url=None,
-    debug=os.getenv("ENVIRONMENT") != "production"
+    redoc_url=None
 )
 
-# Add CORS middleware with specific origins
+# Add CORS middleware with more specific configuration
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",  # Local development
-        "https://multi-agent-tutor.vercel.app",  # Vercel deployment
-        os.getenv("FRONTEND_URL", "")  # Railway environment variable
+        "http://localhost:8000",  # Local FastAPI
+        "https://multi-agent-tutor-production-1d88.up.railway.app",  # Production
+        "https://*.railway.app",  # Any Railway subdomain
+        "*"  # Fallback for development
     ],
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
+    expose_headers=["*"],
+    max_age=3600,  # Cache preflight requests for 1 hour
 )
 
-# Add exception handlers
-app.add_exception_handler(TutorException, tutor_exception_handler)
-app.add_exception_handler(Exception, general_exception_handler)
+# Add a test endpoint to verify CORS
+@app.options("/{path:path}")
+async def options_handler(path: str):
+    """Handle OPTIONS request for CORS preflight"""
+    logger.info(f"Received OPTIONS request for /{path}")
+    return {"status": "ok"}
 
 # Configure Gemini API
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -79,17 +71,11 @@ logger.info(f"System initialized with {len(tutor_agent.registry.agents)} special
 
 # API Models
 class QueryRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=1000)
-    context: Optional[str] = Field(None, max_length=2000)
-    user_id: Optional[str] = Field(None, max_length=100)
-    session_id: Optional[str] = Field(None, max_length=100)
+    query: str
+    context: Optional[str] = None
+    user_id: Optional[str] = None
+    session_id: Optional[str] = None
     use_context_history: Optional[bool] = True
-
-    @validator('query')
-    def validate_query(cls, v):
-        if not v.strip():
-            raise InvalidQueryError("Query cannot be empty")
-        return v
 
 class QueryResponse(BaseModel):
     answer: str
@@ -124,23 +110,22 @@ async def health_check():
 async def ask_tutor(request: QueryRequest):
     """Process questions using the AI tutor system with tool capabilities and session history"""
     try:
+        logger.info(f"Received POST request to /ask with query: {request.query[:100]}...")
+        
         # Generate session ID if not provided
         session_id = request.session_id or str(uuid.uuid4())
         
         # Get conversation history if enabled
         context = request.context or ""
         if request.use_context_history:
-            try:
-                session_context = session_manager.get_context(session_id)
-                if session_context:
-                    # Combine provided context with session history
-                    if context:
-                        context = f"{context}\n\nConversation History:\n{session_context}"
-                    else:
-                        context = f"Conversation History:\n{session_context}"
-                    logger.info(f"Using conversation history for session {session_id} ({len(session_context)} chars)")
-            except Exception as e:
-                raise SessionError(f"Error retrieving session context: {str(e)}", session_id)
+            session_context = session_manager.get_context(session_id)
+            if session_context:
+                # Combine provided context with session history
+                if context:
+                    context = f"{context}\n\nConversation History:\n{session_context}"
+                else:
+                    context = f"Conversation History:\n{session_context}"
+                logger.info(f"Using conversation history for session {session_id} ({len(session_context)} chars)")
         
         # Create and process task
         task = TaskRequest(
@@ -150,10 +135,8 @@ async def ask_tutor(request: QueryRequest):
             session_id=session_id
         )
         
-        try:
-            response = tutor_agent.process_task(task)
-        except Exception as e:
-            raise ToolExecutionError(f"Error processing task: {str(e)}")
+        logger.info("Processing task with tutor agent...")
+        response = tutor_agent.process_task(task)
         
         # Determine agent used
         agent_used = "AI Tutor Coordinator"
@@ -163,15 +146,14 @@ async def ask_tutor(request: QueryRequest):
                 agent_used = f"{delegated_agent.name}"
         
         # Add to session history
-        try:
-            session_manager.add_interaction(
-                session_id=session_id,
-                query=request.query,
-                response=response.content,
-                agent_used=agent_used
-            )
-        except Exception as e:
-            raise SessionError(f"Error updating session history: {str(e)}", session_id)
+        session_manager.add_interaction(
+            session_id=session_id,
+            query=request.query,
+            response=response.content,
+            agent_used=agent_used
+        )
+        
+        logger.info(f"Successfully processed request. Agent used: {agent_used}")
         
         return QueryResponse(
             answer=response.content,
@@ -182,39 +164,35 @@ async def ask_tutor(request: QueryRequest):
             session_id=session_id,
             metadata=response.metadata
         )
-    except TutorException:
-        raise
     except Exception as e:
-        logger.error(f"Unexpected error in ask_tutor: {str(e)}", exc_info=True)
-        raise
+        logger.error(f"Error processing request: {str(e)}", exc_info=True)
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": str(e),
+                "type": type(e).__name__,
+                "message": "Error processing request"
+            }
+        )
 
 @app.post("/ask/{agent_type}", response_model=QueryResponse)
 async def ask_specific_agent(agent_type: str, request: QueryRequest):
     """Directly ask a specific agent (math, physics) with session history"""
     try:
-        # Check if agent exists
-        agent = tutor_agent.registry.get_agent(agent_type)
-        if not agent:
-            valid_agents = list(tutor_agent.registry.agents.keys())
-            raise AgentNotFoundError(agent_type, valid_agents)
-        
         # Generate session ID if not provided
         session_id = request.session_id or str(uuid.uuid4())
         
         # Get conversation history if enabled
         context = request.context or ""
         if request.use_context_history:
-            try:
-                session_context = session_manager.get_context(session_id)
-                if session_context:
-                    # Combine provided context with session history
-                    if context:
-                        context = f"{context}\n\nConversation History:\n{session_context}"
-                    else:
-                        context = f"Conversation History:\n{session_context}"
-                    logger.info(f"Using conversation history for session {session_id} ({len(session_context)} chars)")
-            except Exception as e:
-                raise SessionError(f"Error retrieving session context: {str(e)}", session_id)
+            session_context = session_manager.get_context(session_id)
+            if session_context:
+                # Combine provided context with session history
+                if context:
+                    context = f"{context}\n\nConversation History:\n{session_context}"
+                else:
+                    context = f"Conversation History:\n{session_context}"
+                logger.info(f"Using conversation history for session {session_id} ({len(session_context)} chars)")
         
         # Create task with context
         task = TaskRequest(
@@ -224,21 +202,22 @@ async def ask_specific_agent(agent_type: str, request: QueryRequest):
             session_id=session_id
         )
         
-        try:
-            response = agent.process_task(task)
-        except Exception as e:
-            raise ToolExecutionError(f"Error processing task with {agent_type} agent: {str(e)}", agent_type)
+        # Check if agent exists
+        agent = tutor_agent.registry.get_agent(agent_type)
+        if not agent:
+            valid_agents = list(tutor_agent.registry.agents.keys())
+            raise HTTPException(status_code=404, detail=f"Agent '{agent_type}' not found. Valid agents: {valid_agents}")
+        
+        # Process with specific agent
+        response = agent.process_task(task)
         
         # Add to session history
-        try:
-            session_manager.add_interaction(
-                session_id=session_id,
-                query=request.query,
-                response=response.content,
-                agent_used=agent.name
-            )
-        except Exception as e:
-            raise SessionError(f"Error updating session history: {str(e)}", session_id)
+        session_manager.add_interaction(
+            session_id=session_id,
+            query=request.query,
+            response=response.content,
+            agent_used=agent.name
+        )
         
         return QueryResponse(
             answer=response.content,
@@ -249,11 +228,11 @@ async def ask_specific_agent(agent_type: str, request: QueryRequest):
             session_id=session_id,
             metadata=response.metadata
         )
-    except TutorException:
+    except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Unexpected error in ask_specific_agent: {str(e)}", exc_info=True)
-        raise
+        logger.error(f"Error with {agent_type}: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error with {agent_type} agent: {str(e)}")
 
 @app.get("/agents")
 async def get_available_agents():
@@ -271,8 +250,7 @@ async def get_available_agents():
             "agents": agents_info
         }
     except Exception as e:
-        logger.error(f"Error fetching agents: {str(e)}", exc_info=True)
-        raise
+        raise HTTPException(status_code=500, detail=f"Error fetching agents: {str(e)}")
 
 @app.get("/session/{session_id}", response_model=SessionInfo)
 async def get_session_info(session_id: str):
@@ -280,7 +258,7 @@ async def get_session_info(session_id: str):
     try:
         session_info = session_manager.get_session_info(session_id)
         if not session_info["exists"]:
-            raise SessionError(f"Session '{session_id}' not found or expired", session_id)
+            raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found or expired")
             
         return SessionInfo(
             session_id=session_id,
@@ -288,26 +266,35 @@ async def get_session_info(session_id: str):
             agents_used=session_info["agents_used"],
             duration_seconds=session_info["duration_seconds"]
         )
-    except TutorException:
+    except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error fetching session: {str(e)}", exc_info=True)
-        raise
+        logger.error(f"Error fetching session: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error fetching session: {str(e)}")
 
 @app.post("/session/clear/{session_id}")
 async def clear_session(session_id: str):
     """Clear session history for a specific session"""
     try:
-        success = session_manager.clear_session(session_id)
-        if not success:
-            raise SessionError(f"Session '{session_id}' not found or already cleared", session_id)
-        return {"message": f"Session {session_id} cleared successfully"}
-    except TutorException:
+        session_info = session_manager.get_session_info(session_id)
+        if not session_info["exists"]:
+            raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found or expired")
+            
+        # Create empty session (effectively clearing history)
+        session_manager.sessions[session_id] = {
+            "history": [],
+            "last_updated": time.time(),
+            "agents_used": []
+        }
+            
+        return {"status": "success", "message": f"Session '{session_id}' cleared successfully"}
+    except HTTPException:
         raise
     except Exception as e:
-        logger.error(f"Error clearing session: {str(e)}", exc_info=True)
-        raise
+        logger.error(f"Error clearing session: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error clearing session: {str(e)}")
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=PORT)
+    port = int(os.getenv("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
